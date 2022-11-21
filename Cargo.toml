@@ -8,6 +8,7 @@ description = "Protohackers"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0.66"
 clap = { version = "4.0.22", features = ["derive"] }
 primes = "0.3.0"
 serde = { version = "1.0.147", features = ["derive"] }

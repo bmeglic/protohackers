@@ -1,7 +1,9 @@
+use anyhow::{anyhow, Error, Result};
 use clap::Parser;
 use primes;
 use serde::Serialize;
-use serde_json::{Result, Value};
+use serde_json;
+use serde_json::Value;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
@@ -50,7 +52,7 @@ fn handle_client(stream: TcpStream) {
         dbg!(&line);
 
         let line = &line.unwrap();
-        if let Ok((out, shutdown)) = parse_line(&line) {
+        if let Ok(out) = parse_line(&line) {
             //dbg!(&out);
             println!("out: {}", &out);
 
@@ -64,12 +66,12 @@ fn handle_client(stream: TcpStream) {
                 break;
             }
             writer.flush().unwrap();
-
-            if shutdown == true {
+        } else {
+            if let Err(_) = writer.write(b"\n") {
                 stream.shutdown(Shutdown::Both).unwrap();
                 break;
             }
-        } else {
+            writer.flush().unwrap();
             stream.shutdown(Shutdown::Both).unwrap();
             break;
         }
@@ -85,9 +87,9 @@ struct PrimeResponse {
     prime: bool,
 }
 
-fn parse_line(input: &String) -> Result<(String, bool)> {
+fn parse_line(input: &String) -> Result<String> {
     println!("inp: {}", &input);
-    let json: Result<Value> = serde_json::from_str(input);
+    let json: serde_json::Result<Value> = serde_json::from_str(input);
 
     let resp_ok = PrimeResponse {
         method: "isPrime".to_owned(),
@@ -97,53 +99,38 @@ fn parse_line(input: &String) -> Result<(String, bool)> {
         method: "isPrime".to_owned(),
         prime: false,
     };
-    let resp_malform = PrimeResponse {
-        method: "Error".to_owned(),
-        prime: false,
-    };
 
     match json {
         Ok(json) => {
             //dbg!(&json);
 
-            let method = json.get("method");
-            let method = match method {
-                None => {
-                    return Ok((serde_json::to_string(&resp_malform).unwrap(), true));
-                }
-                Some(method) => method,
-            };
-
+            let method = json
+                .get("method")
+                .ok_or_else(|| anyhow!("Field method not found"))?;
             if method != "isPrime" {
-                return Ok((serde_json::to_string(&resp_malform).unwrap(), true));
+                return Err(anyhow!("Field method is not isPrime"));
             }
 
-            let number = json.get("number");
-            let number = match number {
-                None => {
-                    return Ok((serde_json::to_string(&resp_malform).unwrap(), true));
-                }
-                Some(number) => number,
-            };
-
+            let number = json
+                .get("number")
+                .ok_or_else(|| anyhow!("Field number not found"))?;
             if number.is_number() != true {
-                return Ok((serde_json::to_string(&resp_malform).unwrap(), true));
-            }
-            if number.is_u64() != true {
-                return Ok((serde_json::to_string(&resp_nok).unwrap(), false));
+                return Err(anyhow!("Field number is not a number"));
             }
 
-            let number = number.as_u64().unwrap();
-            if primes::is_prime(number) {
-                Ok((serde_json::to_string(&resp_ok).unwrap(), false))
+            if number.is_u64() != true {
+                return Ok(serde_json::to_string(&resp_nok).unwrap());
+            }
+
+            if primes::is_prime(number.as_u64().unwrap()) {
+                Ok(serde_json::to_string(&resp_ok).unwrap())
             } else {
-                Ok((serde_json::to_string(&resp_nok).unwrap(), false))
+                Ok(serde_json::to_string(&resp_nok).unwrap())
             }
         }
         Err(e) => {
             println!("Err: {}", e);
-            Ok((serde_json::to_string(&resp_malform).unwrap(), true))
-            //Err(e)
+            Err(Error::new(e))
         }
     }
 }
