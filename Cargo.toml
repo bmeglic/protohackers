@@ -9,6 +9,7 @@ description = "Protohackers"
 
 [dependencies]
 anyhow = "1.0.66"
+byteorder = "1.4.3"
 clap = { version = "4.0.22", features = ["derive"] }
 primes = "0.3.0"
 serde = { version = "1.0.147", features = ["derive"] }

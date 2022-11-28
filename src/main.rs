@@ -1,12 +1,11 @@
-use anyhow::{anyhow, Error, Result};
+use byteorder::{ByteOrder, NetworkEndian};
 use clap::Parser;
-use primes;
-use serde::Serialize;
-use serde_json;
-use serde_json::Value;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{Read, Write, ErrorKind};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
+use std::error::Error;
+use std::collections::BTreeMap;
+
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -42,95 +41,90 @@ fn main() {
     }
 }
 
+#[derive(Debug)]
+enum Msg {
+    Insert { timestamp: i32, price: i32 },
+    Query { time_min: i32, time_max: i32 },
+}
+
+impl Msg {
+    fn parse(stream: &mut TcpStream) -> Result<Msg, Box<dyn Error>> {
+        let mut buf = vec![0u8; 9];
+        let mut handle = stream.take(9);
+
+        handle.read_exact(&mut buf)?;
+
+        let msg_type = char::from_u32(buf[0] as u32).unwrap_or('0');
+        let val1 = NetworkEndian::read_i32(&buf[1..5]);
+        let val2 = NetworkEndian::read_i32(&buf[5..]);
+
+        match msg_type {
+            'I' => Ok(Msg::Insert { timestamp: val1, price: val2 }),
+            'Q' => Ok(Msg::Query { time_min: val1, time_max: val2 }),
+            _ => Err(Box::new(std::io::Error::new(ErrorKind::Other, "Unknown command"))),
+        }
+    }
+}
+
+
+fn write_result(stream: &mut TcpStream, val: i32) -> Result<(), Box<dyn Error>> {
+    let mut buf = vec![0u8; 4];
+    NetworkEndian::write_i32(&mut buf, val);
+    stream.write(&buf)?;
+    stream.flush()?;
+    Ok(())
+}
+
 fn handle_client(stream: TcpStream) {
     println!("New connection: {}", stream.peer_addr().unwrap());
 
-    let reader = BufReader::new(&stream);
-    let mut writer = BufWriter::new(&stream);
+    let mut stream = stream;
+    let mut prices: BTreeMap<i32, i32> = BTreeMap::new();
 
-    for line in reader.lines() {
-        dbg!(&line);
+    loop {
 
-        let line = &line.unwrap();
-        if let Ok(out) = parse_line(&line) {
-            //dbg!(&out);
-            println!("out: {}", &out);
+        let msg = Msg::parse(&mut stream);
+        match msg {
+            Ok(msg) => {
+                //dbg!(&msg);
+                match msg {
+                    Msg::Insert { timestamp, price } => {
+                        println!("Processing insert: {}:{}", timestamp, price);
+                        prices.insert(timestamp, price);
+                    },
+                    Msg::Query { time_min, time_max } => {
+                        println!("Processing query: {}:{}", time_min, time_max);
 
-            if let Err(_) = writer.write(&out.as_bytes()) {
-                stream.shutdown(Shutdown::Both).unwrap();
+                        let mut sum: i64 = 0;
+                        let mut cnt = 0;
+
+                        if time_min > time_max {
+                            println!("mintime > maxtime");
+                        }
+                        else {
+                            for (key, value) in prices.iter() {
+                                if time_min <= *key && time_max >= *key {
+                                    sum = sum + *value as i64;
+                                    cnt += 1;
+                                }
+                            }
+                        }
+    
+                        let val: i32 = if cnt > 0 { (sum/cnt) as i32 } else { 0 };
+                        if let Err(e) = write_result(&mut stream, val) {
+                            println!("Err: {}", e);
+                            break;
+                        }
+                    },
+                };
+            }
+            Err(e) => {
+                println!("Err: {}", e);
                 break;
             }
-
-            if let Err(_) = writer.write(b"\n") {
-                stream.shutdown(Shutdown::Both).unwrap();
-                break;
-            }
-            writer.flush().unwrap();
-        } else {
-            if let Err(_) = writer.write(b"\n") {
-                stream.shutdown(Shutdown::Both).unwrap();
-                break;
-            }
-            writer.flush().unwrap();
-            stream.shutdown(Shutdown::Both).unwrap();
-            break;
         }
     }
 
     println!("Client disconnected");
     stream.shutdown(Shutdown::Write).unwrap_or(())
-}
-
-#[derive(Serialize)]
-struct PrimeResponse {
-    method: String,
-    prime: bool,
-}
-
-fn parse_line(input: &String) -> Result<String> {
-    println!("inp: {}", &input);
-    let json: serde_json::Result<Value> = serde_json::from_str(input);
-
-    let resp_ok = PrimeResponse {
-        method: "isPrime".to_owned(),
-        prime: true,
-    };
-    let resp_nok = PrimeResponse {
-        method: "isPrime".to_owned(),
-        prime: false,
-    };
-
-    match json {
-        Ok(json) => {
-            //dbg!(&json);
-
-            let method = json
-                .get("method")
-                .ok_or_else(|| anyhow!("Field method not found"))?;
-            if method != "isPrime" {
-                return Err(anyhow!("Field method is not isPrime"));
-            }
-
-            let number = json
-                .get("number")
-                .ok_or_else(|| anyhow!("Field number not found"))?;
-            if number.is_number() != true {
-                return Err(anyhow!("Field number is not a number"));
-            }
-
-            if number.is_u64() != true {
-                return Ok(serde_json::to_string(&resp_nok).unwrap());
-            }
-
-            if primes::is_prime(number.as_u64().unwrap()) {
-                Ok(serde_json::to_string(&resp_ok).unwrap())
-            } else {
-                Ok(serde_json::to_string(&resp_nok).unwrap())
-            }
-        }
-        Err(e) => {
-            println!("Err: {}", e);
-            Err(Error::new(e))
-        }
-    }
 }
